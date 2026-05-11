@@ -1,0 +1,14 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["react"],
+    "baseUrl": ".",
+    "paths": {
+      "@firebase/auth": ["node_modules/@firebase/auth/dist/rn/index.rn.d.ts"],
+      "@/*": ["src/*"]
+    }
+  },
+  "include": ["App.tsx", "index.ts", "src"]
+}
