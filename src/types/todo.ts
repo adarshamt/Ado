@@ -28,4 +28,4 @@ export type TodoDraft = Omit<
   "id" | "userId" | "createdAt" | "updatedAt" | "completed" | "completedAt" | "lastNotifiedAt"
 >;
 
-export type TodoFilter = "today" | "upcoming" | "completed";
+export type TodoFilter = "today" | "upcoming" | "past" | "completed";

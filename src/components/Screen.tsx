@@ -6,11 +6,12 @@ import { colors, spacing } from "@/theme";
 
 type ScreenProps = {
   children: ReactNode;
+  footer?: ReactNode;
   scroll?: boolean;
   padded?: boolean;
 };
 
-export function Screen({ children, scroll = true, padded = true }: ScreenProps) {
+export function Screen({ children, footer, scroll = true, padded = true }: ScreenProps) {
   const contentStyle = [styles.content, padded && styles.padded];
 
   return (
@@ -30,6 +31,7 @@ export function Screen({ children, scroll = true, padded = true }: ScreenProps) 
         ) : (
           <View style={contentStyle}>{children}</View>
         )}
+        {footer ? <View style={[styles.footer, padded && styles.footerPadded]}>{footer}</View> : null}
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -48,5 +50,12 @@ const styles = StyleSheet.create({
   },
   padded: {
     padding: spacing.lg
+  },
+  footer: {
+    backgroundColor: colors.background
+  },
+  footerPadded: {
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.lg
   }
 });

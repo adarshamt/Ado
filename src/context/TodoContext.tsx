@@ -16,6 +16,14 @@ import {
   type TodoArrival
 } from "@/services/locationReminders";
 import { getTodosForUser, saveTodosForUser } from "@/services/todoStorage";
+import {
+  deleteTodoFromRemote,
+  getTodosFromRemote,
+  saveTodoToRemote,
+  saveTodosToRemote,
+  updateTodoOnRemote,
+  watchUserTodos
+} from "@/services/todosRemote";
 import type { Todo, TodoDraft, TodoLocation } from "@/types/todo";
 
 import { useAuth } from "./AuthContext";
@@ -49,8 +57,19 @@ export function TodoProvider({ children }: { children: ReactNode }) {
       }
 
       setTodos(nextTodos);
+      
+      // Sync to local storage
       await saveTodosForUser(user.uid, nextTodos);
 
+      // Sync to Firestore
+      try {
+        await saveTodosToRemote(nextTodos);
+      } catch (error) {
+        console.error("Failed to sync todos to Firestore:", error);
+        // Continue with local storage even if Firestore fails
+      }
+
+      // Register geofences
       try {
         await registerTodoGeofences(user.uid, nextTodos);
       } catch {
@@ -70,27 +89,57 @@ export function TodoProvider({ children }: { children: ReactNode }) {
         await scheduleTodoArrivalNotification(todo, user.uid);
       }
 
-      Alert.alert(
-        "Location reminder",
-        `You reached ${place}. Task: ${todo.title}.`,
-        [{ text: "OK" }]
-      );
-
-      await syncTodos(
-        todos.map((item) =>
-          item.id === todo.id
-            ? {
-                ...item,
-                lastNotifiedAt: now,
-                updatedAt: now
+      return new Promise<void>((resolve) => {
+        Alert.alert(
+          "Location reminder",
+          `You reached ${place}. Task: ${todo.title}.`,
+          [
+            {
+              text: "Mark Complete",
+              onPress: async () => {
+                await syncTodos(
+                  todos.map((item) =>
+                    item.id === todo.id
+                      ? {
+                          ...item,
+                          completed: true,
+                          completedAt: now,
+                          lastNotifiedAt: now,
+                          updatedAt: now
+                        }
+                      : item
+                  )
+                );
+                if (__DEV__) {
+                  console.log(`Location reminder completed for "${todo.title}" at ${distanceLabel}m.`);
+                }
+                resolve();
+              },
+              style: "default"
+            },
+            {
+              text: "Dismiss",
+              onPress: async () => {
+                await syncTodos(
+                  todos.map((item) =>
+                    item.id === todo.id
+                      ? {
+                          ...item,
+                          lastNotifiedAt: now,
+                          updatedAt: now
+                        }
+                      : item
+                  )
+                );
+                if (__DEV__) {
+                  console.log(`Location reminder shown for "${todo.title}" at ${distanceLabel}m.`);
+                }
+                resolve();
               }
-            : item
-        )
-      );
-
-      if (__DEV__) {
-        console.log(`Location reminder shown for "${todo.title}" at ${distanceLabel}m.`);
-      }
+            }
+          ]
+        );
+      });
     },
     [syncTodos, todos, user]
   );
@@ -103,11 +152,24 @@ export function TodoProvider({ children }: { children: ReactNode }) {
 
     setLoading(true);
     try {
-      const stored = await getTodosForUser(user.uid);
+      // Try to get todos from Firestore first
+      let stored = await getTodosFromRemote(user.uid);
+      
+      // Fallback to local storage if Firestore is empty or unavailable
+      if (stored.length === 0) {
+        stored = await getTodosForUser(user.uid);
+      }
+      
       setTodos(stored);
       await registerTodoGeofences(user.uid, stored);
     } catch {
-      setTodos([]);
+      // If both fail, try local storage
+      try {
+        const stored = await getTodosForUser(user.uid);
+        setTodos(stored);
+      } catch {
+        setTodos([]);
+      }
     } finally {
       setLoading(false);
     }
@@ -116,6 +178,23 @@ export function TodoProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     refreshTodos();
   }, [refreshTodos]);
+
+  // Set up real-time listener for Firestore changes
+  useEffect(() => {
+    if (!user) {
+      return;
+    }
+
+    const unsubscribe = watchUserTodos(user.uid, (remoteTodos) => {
+      setTodos(remoteTodos);
+      // Also save to local storage for offline access
+      void saveTodosForUser(user.uid, remoteTodos);
+    });
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, [user]);
 
   useEffect(() => {
     let subscription: { remove: () => void } | null = null;
@@ -154,31 +233,55 @@ export function TodoProvider({ children }: { children: ReactNode }) {
         updatedAt: now
       };
 
-      await syncTodos([todo, ...todos]);
+      const newTodos = [todo, ...todos];
+      await syncTodos(newTodos);
+      
+      // Also save individual todo to Firestore for faster sync
+      try {
+        await saveTodoToRemote(todo);
+      } catch (error) {
+        console.error("Failed to save todo to Firestore:", error);
+      }
     },
     [syncTodos, todos, user]
   );
 
   const updateTodo = useCallback(
     async (todoId: string, draft: TodoDraft) => {
+      const updatedAt = new Date().toISOString();
       const nextTodos = todos.map((todo) =>
         todo.id === todoId
           ? {
               ...todo,
               ...draft,
-              updatedAt: new Date().toISOString()
+              updatedAt
             }
           : todo
       );
 
       await syncTodos(nextTodos);
+
+      // Also update individual todo on Firestore for faster sync
+      try {
+        await updateTodoOnRemote(todoId, { ...draft, updatedAt });
+      } catch (error) {
+        console.error("Failed to update todo on Firestore:", error);
+      }
     },
     [syncTodos, todos]
   );
 
   const deleteTodo = useCallback(
     async (todoId: string) => {
-      await syncTodos(todos.filter((todo) => todo.id !== todoId));
+      const nextTodos = todos.filter((todo) => todo.id !== todoId);
+      await syncTodos(nextTodos);
+
+      // Also delete individual todo from Firestore for faster sync
+      try {
+        await deleteTodoFromRemote(todoId);
+      } catch (error) {
+        console.error("Failed to delete todo from Firestore:", error);
+      }
     },
     [syncTodos, todos]
   );
@@ -198,6 +301,20 @@ export function TodoProvider({ children }: { children: ReactNode }) {
       );
 
       await syncTodos(nextTodos);
+
+      // Also update individual todo on Firestore for faster sync
+      const updatedTodo = nextTodos.find((t) => t.id === todoId);
+      if (updatedTodo) {
+        try {
+          await updateTodoOnRemote(todoId, {
+            completed: updatedTodo.completed,
+            completedAt: updatedTodo.completedAt,
+            updatedAt: now
+          });
+        } catch (error) {
+          console.error("Failed to toggle todo on Firestore:", error);
+        }
+      }
     },
     [syncTodos, todos]
   );

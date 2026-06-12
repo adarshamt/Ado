@@ -8,8 +8,11 @@ import { getTodosForUser, saveTodosForUser } from "@/services/todoStorage";
 import type { Todo } from "@/types/todo";
 
 export const TODO_GEOFENCE_TASK = "ASH_TODO_GEOFENCE_TASK";
-const LEGACY_TODO_NOTIFICATION_CHANNEL = "ash-todo-location-reminders";
-export const TODO_NOTIFICATION_CHANNEL = "ash-todo-location-alerts-v2";
+const LEGACY_TODO_NOTIFICATION_CHANNELS = [
+  "ash-todo-location-reminders",
+  "ash-todo-location-alerts-v2"
+];
+export const TODO_NOTIFICATION_CHANNEL = "ash-todo-location-alerts-v3";
 
 const isExpoGo = Constants.appOwnership === "expo";
 const LOCATION_ALERT_THROTTLE_MS = 60 * 60 * 1000;
@@ -121,7 +124,11 @@ export async function configureNotifications() {
   }
 
   if (Platform.OS === "android") {
-    await Notifications.deleteNotificationChannelAsync(LEGACY_TODO_NOTIFICATION_CHANNEL).catch(() => undefined);
+    await Promise.all(
+      LEGACY_TODO_NOTIFICATION_CHANNELS.map((channelId) =>
+        Notifications.deleteNotificationChannelAsync(channelId).catch(() => undefined)
+      )
+    );
     await Notifications.setNotificationChannelAsync(TODO_NOTIFICATION_CHANNEL, {
       name: "Location arrival alerts",
       description: "Sound alerts when you reach a todo reminder location.",
@@ -130,7 +137,7 @@ export async function configureNotifications() {
       lightColor: "#326BFF",
       sound: "default",
       audioAttributes: {
-        usage: Notifications.AndroidAudioUsage.NOTIFICATION_EVENT,
+        usage: Notifications.AndroidAudioUsage.NOTIFICATION,
         contentType: Notifications.AndroidAudioContentType.SONIFICATION
       },
       enableVibrate: true
@@ -156,6 +163,31 @@ export async function scheduleTodoArrivalNotification(todo: Todo, userId: string
       sound: "default",
       priority: Notifications.AndroidNotificationPriority.MAX,
       vibrate: [0, 250, 250, 250],
+      color: "#326BFF",
+      interruptionLevel: "timeSensitive"
+    },
+    trigger: Platform.OS === "android" ? { channelId: TODO_NOTIFICATION_CHANNEL } : null
+  });
+
+  return true;
+}
+
+export async function sendTestNotificationSound() {
+  const Notifications = await getNotifications();
+  if (!Notifications) {
+    return false;
+  }
+
+  await configureNotifications();
+
+  await Notifications.scheduleNotificationAsync({
+    content: {
+      title: "Ado notification test",
+      body: "If your phone is not muted, this alert should play sound.",
+      sound: "default",
+      priority: Notifications.AndroidNotificationPriority.MAX,
+      vibrate: [0, 250, 250, 250],
+      color: "#326BFF",
       interruptionLevel: "timeSensitive"
     },
     trigger: Platform.OS === "android" ? { channelId: TODO_NOTIFICATION_CHANNEL } : null

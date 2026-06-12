@@ -36,3 +36,7 @@ export function isToday(dateKey: string) {
 export function isUpcoming(dateKey: string, timeKey: string) {
   return fromDateAndTime(dateKey, timeKey).getTime() >= Date.now();
 }
+
+export function isPast(dateKey: string, timeKey: string) {
+  return fromDateAndTime(dateKey, timeKey).getTime() < Date.now();
+}

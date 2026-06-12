@@ -16,7 +16,7 @@ import { useTodos } from "@/context/TodoContext";
 import type { AppStackParamList } from "@/navigation/types";
 import { colors, radius, spacing, typography } from "@/theme";
 import type { TodoFilter } from "@/types/todo";
-import { isToday, isUpcoming } from "@/utils/dates";
+import { isToday, isUpcoming, isPast } from "@/utils/dates";
 
 type Props = NativeStackScreenProps<AppStackParamList, "Home">;
 type IconName = ComponentProps<typeof Ionicons>["name"];
@@ -24,6 +24,7 @@ type IconName = ComponentProps<typeof Ionicons>["name"];
 const filters: { label: string; value: TodoFilter }[] = [
   { label: "Today", value: "today" },
   { label: "Upcoming", value: "upcoming" },
+  { label: "Past", value: "past" },
   { label: "Done", value: "completed" }
 ];
 
@@ -36,6 +37,7 @@ export function HomeDashboardScreen({ navigation }: Props) {
     () => ({
       today: todos.filter((todo) => !todo.completed && isToday(todo.dueDate)).length,
       upcoming: todos.filter((todo) => !todo.completed && isUpcoming(todo.dueDate, todo.dueTime)).length,
+      past: todos.filter((todo) => !todo.completed && isPast(todo.dueDate, todo.dueTime)).length,
       completed: todos.filter((todo) => todo.completed).length
     }),
     [todos]
@@ -50,6 +52,10 @@ export function HomeDashboardScreen({ navigation }: Props) {
       return todos.filter((todo) => !todo.completed && isToday(todo.dueDate));
     }
 
+    if (filter === "past") {
+      return todos.filter((todo) => !todo.completed && isPast(todo.dueDate, todo.dueTime));
+    }
+
     return todos.filter((todo) => !todo.completed && isUpcoming(todo.dueDate, todo.dueTime));
   }, [filter, todos]);
 
@@ -62,8 +68,17 @@ export function HomeDashboardScreen({ navigation }: Props) {
     ]);
   };
 
+  const footer = (
+    <View style={styles.bottomNav}>
+      <DashboardNavItem active={filter === "today"} icon="home-outline" label="Home" onPress={() => setFilter("today")} />
+      <DashboardNavItem active={filter === "upcoming"} icon="calendar-outline" label="Calendar" onPress={() => setFilter("upcoming")} />
+      <DashboardNavItem icon="add-circle-outline" label="Add" onPress={() => navigation.navigate("TodoEditor")} />
+      <DashboardNavItem icon="person-outline" label="Me" onPress={() => navigation.navigate("Profile")} />
+    </View>
+  );
+
   return (
-    <Screen>
+    <Screen footer={footer}>
       <View style={styles.topBar}>
         <IconButton icon="chevron-back" label="Back" onPress={() => undefined} />
         <Text style={styles.screenTitle}>Calendar</Text>
@@ -96,6 +111,7 @@ export function HomeDashboardScreen({ navigation }: Props) {
       <View style={styles.statsRow}>
         <StatCard icon="today-outline" value={stats.today} label="Today" />
         <StatCard icon="time-outline" value={stats.upcoming} label="Upcoming" />
+        <StatCard icon="alert-circle-outline" value={stats.past} label="Past" />
         <StatCard icon="checkmark-done-outline" value={stats.completed} label="Done" />
       </View>
 
@@ -105,10 +121,18 @@ export function HomeDashboardScreen({ navigation }: Props) {
         {visibleTodos.length === 0 ? (
           <EmptyState
             icon={filter === "completed" ? "checkmark-done-outline" : "clipboard-outline"}
-            title={filter === "completed" ? "No completed tasks" : "Nothing scheduled"}
+            title={
+              filter === "completed"
+                ? "No completed tasks"
+                : filter === "past"
+                ? "No overdue tasks"
+                : "Nothing scheduled"
+            }
             message={
               filter === "completed"
                 ? "Finished tasks will appear here."
+                : filter === "past"
+                ? "You're all caught up on past tasks!"
                 : "Create a task with a date and optional location."
             }
           />
@@ -125,12 +149,6 @@ export function HomeDashboardScreen({ navigation }: Props) {
         )}
       </View>
 
-      <View style={styles.bottomNav}>
-        <DashboardNavItem active={filter === "today"} icon="home-outline" label="Home" onPress={() => setFilter("today")} />
-        <DashboardNavItem active={filter === "upcoming"} icon="calendar-outline" label="Calendar" onPress={() => setFilter("upcoming")} />
-        <DashboardNavItem icon="add-circle-outline" label="Add" onPress={() => navigation.navigate("TodoEditor")} />
-        <DashboardNavItem icon="person-outline" label="Me" onPress={() => navigation.navigate("Profile")} />
-      </View>
     </Screen>
   );
 }
@@ -338,7 +356,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     gap: spacing.xs,
-    marginTop: spacing.lg,
     paddingHorizontal: spacing.sm,
     borderRadius: radius.lg,
     borderWidth: 1,

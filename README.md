@@ -8,7 +8,7 @@ Ado is a React Native todo app with Firebase Authentication, per-user todo stora
 - React Navigation native stack
 - Firebase Authentication
 - AsyncStorage for per-user todos
-- react-native-maps for location selection
+- Custom CARTO/OpenStreetMap tile picker for location selection
 - expo-location and expo-task-manager for geofencing
 - expo-notifications for local reminders
 
@@ -24,9 +24,7 @@ Ado is a React Native todo app with Firebase Authentication, per-user todo stora
 
 3. Enable Email/Password sign-in in Firebase Authentication.
 
-4. Add a Google Maps API key if you want Google Maps in production builds.
-
-5. Start the app:
+4. Start the app:
 
    ```bash
    npm run start

@@ -1,16 +1,24 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Image,
-  type GestureResponderEvent,
-  type LayoutChangeEvent,
+  ActivityIndicator,
+  Keyboard,
   Pressable,
   StyleSheet,
   Text,
+  TextInput,
   View
 } from "react-native";
 
+import Ionicons from "@expo/vector-icons/Ionicons";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import * as Location from "expo-location";
+import MapView, {
+  Circle,
+  Marker,
+  PROVIDER_GOOGLE,
+  type MapPressEvent,
+  type Region
+} from "react-native-maps";
 
 import { AppButton } from "@/components/AppButton";
 import { IconButton } from "@/components/IconButton";
@@ -28,59 +36,67 @@ type Coordinate = {
   longitude: number;
 };
 
-type MapSize = {
-  width: number;
-  height: number;
+type PlacePrediction = {
+  description: string;
+  place_id: string;
+  structured_formatting?: {
+    main_text?: string;
+    secondary_text?: string;
+  };
 };
 
-const TILE_SIZE = 256;
-const DEFAULT_ZOOM = 13;
-const MIN_ZOOM = 3;
-const MAX_ZOOM = 18;
-const TILE_SUBDOMAINS = ["a", "b", "c", "d"];
-const TILE_STYLE = "light_all";
-const TILE_ATTRIBUTION = "© OpenStreetMap contributors © CARTO";
+type PlacesAutocompleteResponse = {
+  error_message?: string;
+  predictions?: PlacePrediction[];
+  status: string;
+};
+
+type PlaceDetailsResponse = {
+  error_message?: string;
+  result?: {
+    formatted_address?: string;
+    geometry?: {
+      location?: {
+        lat: number;
+        lng: number;
+      };
+    };
+    name?: string;
+  };
+  status: string;
+};
+
 const FALLBACK_COORDINATE = {
   latitude: 12.9716,
   longitude: 77.5946
 };
+const DEFAULT_DELTA = {
+  latitudeDelta: 0.012,
+  longitudeDelta: 0.012
+};
+const GOOGLE_MAPS_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY?.trim() ?? "";
+const HAS_GOOGLE_MAPS_KEY = GOOGLE_MAPS_API_KEY.startsWith("AIza");
 
-const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
-
-function coordinateToPixel(coordinate: Coordinate, zoom: number) {
-  const scale = TILE_SIZE * 2 ** zoom;
-  const sinLatitude = Math.sin((coordinate.latitude * Math.PI) / 180);
-
+function toRegion(coordinate: Coordinate, delta: Partial<Region> = {}): Region {
   return {
-    x: ((coordinate.longitude + 180) / 360) * scale,
-    y:
-      (0.5 - Math.log((1 + sinLatitude) / (1 - sinLatitude)) / (4 * Math.PI)) *
-      scale
+    latitude: coordinate.latitude,
+    longitude: coordinate.longitude,
+    latitudeDelta: delta.latitudeDelta ?? DEFAULT_DELTA.latitudeDelta,
+    longitudeDelta: delta.longitudeDelta ?? DEFAULT_DELTA.longitudeDelta
   };
 }
 
-function pixelToCoordinate(x: number, y: number, zoom: number): Coordinate {
-  const scale = TILE_SIZE * 2 ** zoom;
-  const longitude = (x / scale) * 360 - 180;
-  const mercatorY = 0.5 - y / scale;
-  const latitude = 90 - (360 * Math.atan(Math.exp(-mercatorY * 2 * Math.PI))) / Math.PI;
-
-  return {
-    latitude: clamp(latitude, -85, 85),
-    longitude: clamp(longitude, -180, 180)
-  };
+function getPlaceTitle(place: PlacePrediction) {
+  return place.structured_formatting?.main_text ?? place.description;
 }
 
-function getTileUrl(x: number, y: number, zoom: number) {
-  const tileCount = 2 ** zoom;
-  const wrappedX = ((x % tileCount) + tileCount) % tileCount;
-  const subdomain = TILE_SUBDOMAINS[Math.abs(x + y) % TILE_SUBDOMAINS.length];
-
-  return `https://${subdomain}.basemaps.cartocdn.com/${TILE_STYLE}/${zoom}/${wrappedX}/${y}.png`;
+function getPlaceSubtitle(place: PlacePrediction) {
+  return place.structured_formatting?.secondary_text;
 }
 
 export function MapLocationPickerScreen({ navigation, route }: Props) {
   const { setPendingLocation } = useTodos();
+  const mapRef = useRef<MapView | null>(null);
   const initialLocation = route.params?.initialLocation;
 
   const initialCoordinate = useMemo(
@@ -93,85 +109,92 @@ export function MapLocationPickerScreen({ navigation, route }: Props) {
 
   const [selected, setSelected] = useState<Coordinate>(initialCoordinate);
   const [center, setCenter] = useState<Coordinate>(initialCoordinate);
-  const [zoom, setZoom] = useState(DEFAULT_ZOOM);
-  const [mapSize, setMapSize] = useState<MapSize>({ width: 0, height: 0 });
+  const [region, setRegion] = useState<Region>(() => toRegion(initialCoordinate));
   const [radiusMeters, setRadiusMeters] = useState(String(initialLocation?.radius ?? 150));
   const [label, setLabel] = useState(initialLocation?.label ?? "");
+  const [query, setQuery] = useState("");
+  const [places, setPlaces] = useState<PlacePrediction[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState("");
   const [error, setError] = useState("");
 
-  const tiles = useMemo(() => {
-    if (!mapSize.width || !mapSize.height) {
-      return [];
-    }
+  const radiusValue = Number(radiusMeters);
+  const previewRadius = Number.isFinite(radiusValue) ? Math.max(100, Math.min(1000, radiusValue)) : 150;
 
-    const centerPixel = coordinateToPixel(center, zoom);
-    const left = centerPixel.x - mapSize.width / 2;
-    const top = centerPixel.y - mapSize.height / 2;
-    const minTileX = Math.floor(left / TILE_SIZE);
-    const maxTileX = Math.floor((left + mapSize.width) / TILE_SIZE);
-    const minTileY = clamp(Math.floor(top / TILE_SIZE), 0, 2 ** zoom - 1);
-    const maxTileY = clamp(Math.floor((top + mapSize.height) / TILE_SIZE), 0, 2 ** zoom - 1);
-    const nextTiles: { id: string; left: number; top: number; uri: string }[] = [];
-
-    for (let x = minTileX; x <= maxTileX; x += 1) {
-      for (let y = minTileY; y <= maxTileY; y += 1) {
-        nextTiles.push({
-          id: `${zoom}-${x}-${y}`,
-          left: x * TILE_SIZE - left,
-          top: y * TILE_SIZE - top,
-          uri: getTileUrl(x, y, zoom)
-        });
-      }
-    }
-
-    return nextTiles;
-  }, [center, mapSize.height, mapSize.width, zoom]);
-
-  const selectedPosition = useMemo(() => {
-    if (!mapSize.width || !mapSize.height) {
-      return null;
-    }
-
-    const centerPixel = coordinateToPixel(center, zoom);
-    const selectedPixel = coordinateToPixel(selected, zoom);
-
-    return {
-      left: selectedPixel.x - (centerPixel.x - mapSize.width / 2),
-      top: selectedPixel.y - (centerPixel.y - mapSize.height / 2)
-    };
-  }, [center, mapSize.height, mapSize.width, selected, zoom]);
-
-  const onMapLayout = (event: LayoutChangeEvent) => {
-    setMapSize({
-      width: event.nativeEvent.layout.width,
-      height: event.nativeEvent.layout.height
-    });
-  };
-
-  const onMapPress = (event: GestureResponderEvent) => {
-    if (!mapSize.width || !mapSize.height) {
+  useEffect(() => {
+    const trimmed = query.trim();
+    if (trimmed.length < 3 || !HAS_GOOGLE_MAPS_KEY) {
+      setPlaces([]);
+      setSearchError("");
+      setSearching(false);
       return;
     }
 
-    const centerPixel = coordinateToPixel(center, zoom);
-    const left = centerPixel.x - mapSize.width / 2;
-    const top = centerPixel.y - mapSize.height / 2;
-    const nextSelected = pixelToCoordinate(
-      left + event.nativeEvent.locationX,
-      top + event.nativeEvent.locationY,
-      zoom
-    );
+    let active = true;
+    const timeout = setTimeout(() => {
+      setSearching(true);
+      const params = new URLSearchParams({
+        input: trimmed,
+        key: GOOGLE_MAPS_API_KEY,
+        location: `${center.latitude},${center.longitude}`,
+        radius: "50000"
+      });
 
-    setSelected(nextSelected);
-    setCenter(nextSelected);
+      fetch(`https://maps.googleapis.com/maps/api/place/autocomplete/json?${params.toString()}`)
+        .then((response) => response.json() as Promise<PlacesAutocompleteResponse>)
+        .then((data) => {
+          if (!active) {
+            return;
+          }
+
+          if (data.status === "OK") {
+            setPlaces(data.predictions ?? []);
+            setSearchError("");
+            return;
+          }
+
+          setPlaces([]);
+          setSearchError(
+            data.status === "ZERO_RESULTS"
+              ? "No places found."
+              : data.error_message ?? "Place search is unavailable. Check the Google Places API setup."
+          );
+        })
+        .catch(() => {
+          if (active) {
+            setPlaces([]);
+            setSearchError("Unable to search places right now.");
+          }
+        })
+        .finally(() => {
+          if (active) {
+            setSearching(false);
+          }
+        });
+    }, 300);
+
+    return () => {
+      active = false;
+      clearTimeout(timeout);
+    };
+  }, [center.latitude, center.longitude, query]);
+
+  const moveToCoordinate = (coordinate: Coordinate, nextLabel?: string) => {
+    const nextRegion = toRegion(coordinate, {
+      latitudeDelta: Math.min(region.latitudeDelta, DEFAULT_DELTA.latitudeDelta),
+      longitudeDelta: Math.min(region.longitudeDelta, DEFAULT_DELTA.longitudeDelta)
+    });
+
+    setSelected(coordinate);
+    setCenter(coordinate);
+    setRegion(nextRegion);
     setError("");
-  };
 
-  const pan = (latitudeDelta: number, longitudeDelta: number) => {
-    setCenter((current) => ({
-      latitude: clamp(current.latitude + latitudeDelta, -85, 85),
-      longitude: clamp(current.longitude + longitudeDelta, -180, 180)
-    }));
+    if (nextLabel) {
+      setLabel(nextLabel);
+    }
+
+    mapRef.current?.animateToRegion(nextRegion, 450);
   };
 
   const useDeviceLocation = async () => {
@@ -185,21 +208,57 @@ export function MapLocationPickerScreen({ navigation, route }: Props) {
       const current = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.Balanced
       });
-      const coordinate = {
+      moveToCoordinate({
         latitude: current.coords.latitude,
         longitude: current.coords.longitude
-      };
-      setSelected(coordinate);
-      setCenter(coordinate);
-      setError("");
+      });
     } catch {
       setError("Unable to read current location.");
     }
   };
 
-  const confirm = () => {
-    const radiusValue = Number(radiusMeters);
+  const selectPlace = async (place: PlacePrediction) => {
+    Keyboard.dismiss();
+    setQuery(place.description);
+    setPlaces([]);
+    setSearchError("");
+    setSearching(true);
 
+    try {
+      const params = new URLSearchParams({
+        fields: "geometry,name,formatted_address",
+        key: GOOGLE_MAPS_API_KEY,
+        place_id: place.place_id
+      });
+      const response = await fetch(`https://maps.googleapis.com/maps/api/place/details/json?${params.toString()}`);
+      const data = (await response.json()) as PlaceDetailsResponse;
+      const location = data.result?.geometry?.location;
+
+      if (data.status !== "OK" || !location) {
+        setSearchError(data.error_message ?? "Unable to open this place.");
+        return;
+      }
+
+      moveToCoordinate(
+        {
+          latitude: location.lat,
+          longitude: location.lng
+        },
+        data.result?.name ?? getPlaceTitle(place)
+      );
+    } catch {
+      setSearchError("Unable to open this place.");
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const onMapPress = (event: MapPressEvent) => {
+    moveToCoordinate(event.nativeEvent.coordinate);
+    setPlaces([]);
+  };
+
+  const confirm = () => {
     if (!Number.isFinite(radiusValue) || radiusValue < 100 || radiusValue > 1000) {
       setError("Radius must be between 100 and 1000 meters.");
       return;
@@ -217,102 +276,182 @@ export function MapLocationPickerScreen({ navigation, route }: Props) {
   };
 
   return (
-    <Screen>
-      <View style={styles.header}>
-        <Text style={styles.title}>Pick location</Text>
-        <Text style={styles.subtitle}>Select a place for this todo reminder.</Text>
-      </View>
-
-      <View style={styles.mapShell}>
-        <Pressable onLayout={onMapLayout} onPress={onMapPress} style={styles.map}>
-          {tiles.map((tile) => (
-            <Image
-              key={tile.id}
-              source={{ uri: tile.uri }}
-              style={[styles.tile, { left: tile.left, top: tile.top }]}
-            />
-          ))}
-          {selectedPosition ? (
-            <View
-              pointerEvents="none"
-              style={[
-                styles.marker,
-                {
-                  left: selectedPosition.left - 13,
-                  top: selectedPosition.top - 34
-                }
-              ]}
-            >
-              <View style={styles.markerPin} />
-              <View style={styles.markerPoint} />
-            </View>
-          ) : null}
-          <Text style={styles.attribution}>{TILE_ATTRIBUTION}</Text>
-        </Pressable>
-
-        <View style={styles.mapControls}>
-          <IconButton icon="locate-outline" label="Use current location" onPress={() => void useDeviceLocation()} />
-          <IconButton icon="add" label="Zoom in" onPress={() => setZoom((value) => Math.min(MAX_ZOOM, value + 1))} />
-          <IconButton icon="remove" label="Zoom out" onPress={() => setZoom((value) => Math.max(MIN_ZOOM, value - 1))} />
-        </View>
-
-        <View style={styles.panControls}>
-          <IconButton icon="chevron-up" label="Pan north" onPress={() => pan(0.03, 0)} />
-          <View style={styles.panMiddle}>
-            <IconButton icon="chevron-back" label="Pan west" onPress={() => pan(0, -0.03)} />
-            <IconButton icon="chevron-forward" label="Pan east" onPress={() => pan(0, 0.03)} />
+    <Screen padded={false} scroll={false}>
+      <View style={styles.container}>
+        <View style={styles.header}>
+          <IconButton icon="chevron-back" label="Back" onPress={() => navigation.goBack()} />
+          <View style={styles.headerText}>
+            <Text style={styles.title}>Pick location</Text>
+            <Text style={styles.subtitle}>Search, tap, or drag the pin.</Text>
           </View>
-          <IconButton icon="chevron-down" label="Pan south" onPress={() => pan(-0.03, 0)} />
-        </View>
-      </View>
-
-      <View style={styles.panel}>
-        <View style={styles.coords}>
-          <Text style={styles.coordText}>{selected.latitude.toFixed(5)}</Text>
-          <Text style={styles.coordText}>{selected.longitude.toFixed(5)}</Text>
+          <IconButton icon="locate-outline" label="Use current location" onPress={() => void useDeviceLocation()} />
         </View>
 
-        <TextField
-          keyboardType="numeric"
-          label="Radius meters"
-          onChangeText={setRadiusMeters}
-          placeholder="150"
-          value={radiusMeters}
-        />
-        <TextField
-          label="Label"
-          onChangeText={setLabel}
-          placeholder="Office, home, store"
-          value={label}
-        />
+        <View style={styles.mapShell}>
+          {HAS_GOOGLE_MAPS_KEY ? (
+            <MapView
+              ref={mapRef}
+              initialRegion={region}
+              mapType="standard"
+              onPress={onMapPress}
+              onRegionChangeComplete={(nextRegion) => {
+                setCenter({
+                  latitude: nextRegion.latitude,
+                  longitude: nextRegion.longitude
+                });
+                setRegion(nextRegion);
+              }}
+              provider={PROVIDER_GOOGLE}
+              showsCompass
+              showsMyLocationButton={false}
+              showsUserLocation
+              style={styles.map}
+            >
+              <Circle
+                center={selected}
+                fillColor="rgba(50, 107, 255, 0.14)"
+                radius={previewRadius}
+                strokeColor="rgba(50, 107, 255, 0.7)"
+                strokeWidth={2}
+              />
+              <Marker
+                coordinate={selected}
+                draggable
+                onDragEnd={(event) => moveToCoordinate(event.nativeEvent.coordinate)}
+                tracksViewChanges={false}
+              />
+            </MapView>
+          ) : (
+            <View style={styles.mapKeyState}>
+              <Ionicons name="key-outline" size={34} color={colors.primary} />
+              <Text style={styles.mapKeyTitle}>Google Maps key needed</Text>
+              <Text style={styles.mapKeyText}>
+                Add a valid EXPO_PUBLIC_GOOGLE_MAPS_API_KEY, enable Maps SDK for Android and Places API,
+                then rebuild the app.
+              </Text>
+            </View>
+          )}
 
-        {error ? <Text style={styles.error}>{error}</Text> : null}
+          <View style={styles.searchPanel}>
+            <View style={styles.searchInputRow}>
+              <Ionicons name="search" size={18} color={colors.textMuted} />
+              <TextInput
+                autoCapitalize="none"
+                autoCorrect={false}
+                editable={HAS_GOOGLE_MAPS_KEY}
+                onChangeText={setQuery}
+                placeholder={HAS_GOOGLE_MAPS_KEY ? "Search place" : "Add Google Maps key to search"}
+                placeholderTextColor={colors.textSubtle}
+                returnKeyType="search"
+                style={styles.searchInput}
+                value={query}
+              />
+              {searching ? <ActivityIndicator color={colors.primary} size="small" /> : null}
+              {query ? (
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => {
+                    setQuery("");
+                    setPlaces([]);
+                    setSearchError("");
+                  }}
+                >
+                  <Ionicons name="close-circle" size={18} color={colors.textMuted} />
+                </Pressable>
+              ) : null}
+            </View>
 
-        <AppButton icon="checkmark" onPress={confirm} title="Use this location" />
-        <AppButton icon="arrow-back" onPress={() => navigation.goBack()} title="Cancel" variant="secondary" />
+            {places.length > 0 ? (
+              <View style={styles.results}>
+                {places.slice(0, 5).map((place) => (
+                  <Pressable
+                    accessibilityRole="button"
+                    key={place.place_id}
+                    onPress={() => void selectPlace(place)}
+                    style={styles.resultItem}
+                  >
+                    <Ionicons name="location-outline" size={18} color={colors.primary} />
+                    <View style={styles.resultTextBlock}>
+                      <Text numberOfLines={1} style={styles.resultTitle}>{getPlaceTitle(place)}</Text>
+                      {getPlaceSubtitle(place) ? (
+                        <Text numberOfLines={1} style={styles.resultSubtitle}>{getPlaceSubtitle(place)}</Text>
+                      ) : null}
+                    </View>
+                  </Pressable>
+                ))}
+              </View>
+            ) : searchError ? (
+              <Text style={styles.searchError}>{searchError}</Text>
+            ) : null}
+          </View>
+        </View>
+
+        <View style={styles.panel}>
+          <View style={styles.coords}>
+            <Text style={styles.coordText}>{selected.latitude.toFixed(5)}</Text>
+            <Text style={styles.coordText}>{selected.longitude.toFixed(5)}</Text>
+          </View>
+
+          <View style={styles.formRow}>
+            <View style={styles.formItem}>
+              <TextField
+                keyboardType="numeric"
+                label="Radius meters"
+                onChangeText={setRadiusMeters}
+                placeholder="150"
+                value={radiusMeters}
+              />
+            </View>
+            <View style={styles.formItem}>
+              <TextField
+                label="Label"
+                onChangeText={setLabel}
+                placeholder="Office, home, store"
+                value={label}
+              />
+            </View>
+          </View>
+
+          {error ? <Text style={styles.error}>{error}</Text> : null}
+
+          <View style={styles.actions}>
+            <AppButton icon="checkmark" onPress={confirm} title="Use location" />
+            <AppButton icon="arrow-back" onPress={() => navigation.goBack()} title="Cancel" variant="secondary" />
+          </View>
+        </View>
       </View>
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    padding: spacing.lg,
+    backgroundColor: colors.background
+  },
   header: {
-    paddingTop: spacing.md,
+    flexDirection: "row",
+    alignItems: "center",
     gap: spacing.sm
+  },
+  headerText: {
+    flex: 1
   },
   title: {
     color: colors.text,
-    fontSize: typography.title,
+    fontSize: typography.h3,
     fontWeight: "900"
   },
   subtitle: {
     color: colors.textMuted,
-    fontSize: typography.body,
-    lineHeight: 24
+    fontSize: typography.small,
+    marginTop: 2
   },
   mapShell: {
-    height: 380,
-    marginTop: spacing.xl,
+    flex: 1,
+    minHeight: 320,
+    marginTop: spacing.md,
     borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: colors.border,
@@ -320,68 +459,89 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface
   },
   map: {
-    flex: 1,
-    overflow: "hidden",
-    backgroundColor: "#1B2433"
+    ...StyleSheet.absoluteFillObject
   },
-  tile: {
-    position: "absolute",
-    width: TILE_SIZE,
-    height: TILE_SIZE
+  mapKeyState: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: spacing.sm,
+    padding: spacing.xl,
+    backgroundColor: colors.surfaceSoft
   },
-  marker: {
-    position: "absolute",
-    width: 26,
-    height: 36,
-    alignItems: "center"
+  mapKeyTitle: {
+    color: colors.text,
+    fontSize: typography.body,
+    fontWeight: "900",
+    textAlign: "center"
   },
-  markerPin: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    backgroundColor: colors.primary,
-    borderWidth: 3,
-    borderColor: colors.white
+  mapKeyText: {
+    color: colors.textMuted,
+    fontSize: typography.small,
+    lineHeight: 20,
+    textAlign: "center"
   },
-  markerPoint: {
-    width: 10,
-    height: 10,
-    marginTop: -4,
-    backgroundColor: colors.primary,
-    transform: [{ rotate: "45deg" }]
-  },
-  attribution: {
-    position: "absolute",
-    right: spacing.xs,
-    bottom: spacing.xs,
-    color: "#172033",
-    backgroundColor: "rgba(255,255,255,0.72)",
-    paddingHorizontal: spacing.xs,
-    borderRadius: radius.sm,
-    overflow: "hidden",
-    fontSize: typography.tiny,
-    fontWeight: "700"
-  },
-  mapControls: {
+  searchPanel: {
     position: "absolute",
     top: spacing.sm,
-    right: spacing.sm,
-    gap: spacing.sm
-  },
-  panControls: {
-    position: "absolute",
     left: spacing.sm,
-    bottom: spacing.sm,
-    alignItems: "center",
-    gap: spacing.xs
+    right: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: "rgba(255, 255, 255, 0.96)",
+    overflow: "hidden"
   },
-  panMiddle: {
+  searchInputRow: {
+    minHeight: 48,
     flexDirection: "row",
-    gap: spacing.xs
+    alignItems: "center",
+    gap: spacing.sm,
+    paddingHorizontal: spacing.md
+  },
+  searchInput: {
+    flex: 1,
+    color: colors.text,
+    fontSize: typography.body,
+    fontWeight: "700",
+    paddingVertical: spacing.sm
+  },
+  results: {
+    borderTopWidth: 1,
+    borderTopColor: colors.border
+  },
+  resultItem: {
+    minHeight: 52,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: colors.border
+  },
+  resultTextBlock: {
+    flex: 1
+  },
+  resultTitle: {
+    color: colors.text,
+    fontSize: typography.small,
+    fontWeight: "900"
+  },
+  resultSubtitle: {
+    color: colors.textMuted,
+    fontSize: typography.tiny,
+    marginTop: 2
+  },
+  searchError: {
+    color: colors.danger,
+    fontSize: typography.small,
+    lineHeight: 20,
+    paddingHorizontal: spacing.md,
+    paddingBottom: spacing.sm
   },
   panel: {
     gap: spacing.md,
-    marginTop: spacing.lg,
+    marginTop: spacing.md,
     padding: spacing.md,
     borderRadius: radius.lg,
     borderWidth: 1,
@@ -395,12 +555,23 @@ const styles = StyleSheet.create({
   coordText: {
     flex: 1,
     color: colors.text,
-    fontSize: typography.body,
+    fontSize: typography.small,
     fontWeight: "900",
     borderRadius: radius.md,
     backgroundColor: colors.input,
-    padding: spacing.md,
+    padding: spacing.sm,
     overflow: "hidden"
+  },
+  formRow: {
+    flexDirection: "row",
+    gap: spacing.sm
+  },
+  formItem: {
+    flex: 1
+  },
+  actions: {
+    flexDirection: "row",
+    gap: spacing.sm
   },
   error: {
     color: colors.danger,

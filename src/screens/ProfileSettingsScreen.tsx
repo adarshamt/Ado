@@ -13,7 +13,8 @@ import type { AppStackParamList } from "@/navigation/types";
 import {
   configureNotifications,
   getLocationPermissionSummary,
-  requestLocationReminderPermissions
+  requestLocationReminderPermissions,
+  sendTestNotificationSound
 } from "@/services/locationReminders";
 import { colors, radius, spacing, typography } from "@/theme";
 
@@ -90,6 +91,12 @@ export function ProfileSettingsScreen({ navigation }: Props) {
           icon="settings-outline"
           onPress={() => Linking.openSettings()}
           title="Open system settings"
+          variant="secondary"
+        />
+        <AppButton
+          icon="volume-high-outline"
+          onPress={() => void sendTestNotificationSound()}
+          title="Test notification sound"
           variant="secondary"
         />
         <AppButton icon="log-out-outline" onPress={() => void logout()} title="Log out" variant="danger" />
